@@ -40,8 +40,9 @@ ytdl_format_options = {
 
 ffmpeg_options = {
     'before_options': '-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5',
-    'options': '-vn'  # Removed volume control
+    'options': '-vn'
 }
+
 
 class MusicBot:
     def __init__(self):
@@ -56,7 +57,9 @@ class MusicBot:
             self.loop_mode[guild_id] = 0
         return self.queues[guild_id]
 
+
 music_bot = MusicBot()
+
 
 class YTDLSource(discord.PCMVolumeTransformer):
     def __init__(self, source, *, data, volume=0.5):
@@ -100,11 +103,21 @@ class YTDLSource(discord.PCMVolumeTransformer):
             print(f"Error in YTDLSource.from_url: {str(e)}")
             raise
 
+
 @bot.event
 async def on_ready():
     print(f"Bot logged in as {bot.user}")
     print("Bot is ready!")
     await bot.change_presence(activity=discord.Game(name="!help for commands"))
+
+
+async def check_inactive():
+    while True:
+        for voice_client in bot.voice_clients:
+            if not voice_client.is_playing() and not voice_client.is_paused():
+                await voice_client.disconnect()
+        await asyncio.sleep(300)  # Check every 5 minutes
+
 
 @bot.command(name="play", help="Play audio from YouTube URL")
 async def play(ctx, *, query):
@@ -147,6 +160,7 @@ async def play(ctx, *, query):
     except Exception as e:
         print(f"Error during playback: {str(e)}")
         await ctx.send(f"❌ An error occurred: {str(e)}")
+
 
 async def play_next(ctx):
     guild_id = ctx.guild.id
@@ -196,6 +210,120 @@ async def play_next(ctx):
         after=after_playing
     )
 
+
+@bot.command(name="skip", help="Skip the currently playing track")
+async def skip(ctx):
+    if not ctx.voice_client:
+        return await ctx.send("❌ I'm not connected to a voice channel!")
+
+    if not ctx.voice_client.is_playing():
+        return await ctx.send("❌ Nothing is playing right now!")
+
+    ctx.voice_client.stop()
+    await ctx.send("⏭️ Skipped the current track!")
+
+
+@bot.command(name="stop", help="Stop playback and disconnect the bot")
+async def stop(ctx):
+    if not ctx.voice_client:
+        return await ctx.send("❌ I'm not connected to a voice channel!")
+
+    guild_id = ctx.guild.id
+
+    # Clear the queue
+    music_bot.queues[guild_id] = []
+    music_bot.current_track[guild_id] = None
+
+    # Stop playback and disconnect
+    ctx.voice_client.stop()
+    await ctx.voice_client.disconnect()
+    await ctx.send("⏹️ Playback stopped and queue cleared!")
+
+
+@bot.command(name="pause", help="Pause the current track")
+async def pause(ctx):
+    if not ctx.voice_client:
+        return await ctx.send("❌ I'm not connected to a voice channel!")
+
+    if not ctx.voice_client.is_playing():
+        return await ctx.send("❌ Nothing is playing right now!")
+
+    if ctx.voice_client.is_paused():
+        return await ctx.send("⚠️ The track is already paused!")
+
+    ctx.voice_client.pause()
+    await ctx.send("⏸️ Paused the current track!")
+
+
+@bot.command(name="resume", help="Resume playback of a paused track")
+async def resume(ctx):
+    if not ctx.voice_client:
+        return await ctx.send("❌ I'm not connected to a voice channel!")
+
+    if not ctx.voice_client.is_paused():
+        return await ctx.send("❌ The track is not paused!")
+
+    ctx.voice_client.resume()
+    await ctx.send("▶️ Resumed playback!")
+
+
+@bot.command(name="queue", help="Display the current music queue")
+async def queue(ctx):
+    guild_id = ctx.guild.id
+    queue = music_bot.get_queue(guild_id)
+
+    if not queue and guild_id not in music_bot.current_track:
+        return await ctx.send("📪 Queue is empty and nothing is playing!")
+
+    embed = discord.Embed(
+        title="Music Queue",
+        color=discord.Color.blue(),
+        timestamp=datetime.now()
+    )
+
+    # Add current track
+    if guild_id in music_bot.current_track and music_bot.current_track[guild_id]:
+        current = music_bot.current_track[guild_id]
+        duration = str(timedelta(seconds=current.duration)) if current.duration else "Unknown"
+        embed.add_field(
+            name="🎵 Now Playing",
+            value=f"**{current.title}**\nDuration: {duration}\nRequested by: {current.requester.mention}",
+            inline=False
+        )
+
+    # Add queued tracks
+    if queue:
+        queue_text = ""
+        for i, track in enumerate(queue[:10], 1):
+            duration = str(timedelta(seconds=track.duration)) if track.duration else "Unknown"
+            queue_text += f"`{i}.` **{track.title}** | {duration} | Requested by: {track.requester.mention}\n"
+
+        if len(queue) > 10:
+            queue_text += f"\n*and {len(queue) - 10} more tracks...*"
+
+        embed.add_field(name="📑 Up Next", value=queue_text or "No tracks in queue", inline=False)
+
+    # Add loop mode status
+    loop_modes = ["Disabled", "Single Track", "Queue"]
+    current_loop = loop_modes[music_bot.loop_mode.get(guild_id, 0)]
+    embed.add_field(name="🔄 Loop Mode", value=current_loop, inline=False)
+
+    await ctx.send(embed=embed)
+
+
+@bot.command(name="clear", help="Clear the music queue")
+async def clear(ctx):
+    guild_id = ctx.guild.id
+
+    if guild_id not in music_bot.queues or not music_bot.queues[guild_id]:
+        return await ctx.send("❌ The queue is already empty!")
+
+    queue_length = len(music_bot.queues[guild_id])
+    music_bot.queues[guild_id] = []
+
+    await ctx.send(f"🗑️ Cleared {queue_length} tracks from the queue!")
+
+
 @bot.command(name="loop", help="Changes loop mode (off/track/queue)")
 async def loop(ctx, mode=""):
     guild_id = ctx.guild.id
@@ -212,6 +340,7 @@ async def loop(ctx, mode=""):
     else:
         current_mode = ["Disabled", "Single Track", "Queue"][music_bot.loop_mode[guild_id]]
         await ctx.send(f"🔄 Current loop mode: {current_mode}\nUse `!loop off/track/queue` to change")
+
 
 @bot.command(name="np", help="Shows information about the currently playing track")
 async def now_playing(ctx):
@@ -238,6 +367,7 @@ async def now_playing(ctx):
 
     await ctx.send(embed=embed)
 
+
 @bot.command(name="remove", help="Removes a track from the queue by its number")
 async def remove(ctx, position: int):
     guild_id = ctx.guild.id
@@ -250,11 +380,10 @@ async def remove(ctx, position: int):
     removed = queue.pop(position - 1)
     await ctx.send(f"✂️ Removed: **{removed.title}**")
 
+
 if __name__ == "__main__":
     token = os.getenv('DISCORD_TOKEN')
-    if token:
-        print("Token found in environment variables")
-        bot.run(token)
-    else:
-        print("Token not found in environment variables, using direct token")
-        bot.run('#')  # REPLACE THIS IF NOT USING .ENV FILE
+    if not token:
+        print("Error: DISCORD_TOKEN not found in environment variables")
+        exit(1)
+    bot.run(token)
